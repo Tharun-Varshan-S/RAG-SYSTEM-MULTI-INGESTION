@@ -2,13 +2,6 @@ import { useState, useRef, useEffect } from 'react'
 import { Bot, User, Send, FileText, Layers, Code2, Video, Loader2 } from 'lucide-react'
 import './App.css'
 
-const modeOptions = [
-  { id: 'eli5', label: "Explain like I'm 5" },
-  { id: 'technical', label: 'Technical' },
-  { id: 'example', label: 'Real-world example' },
-  { id: 'assist', label: 'Assist' },
-]
-
 const sourceHelpText = {
   document: 'Paste copied text from a document, article, or note.',
   code: 'Paste code snippets, snippets from docs, or repo notes.',
@@ -22,7 +15,6 @@ function App() {
   const [question, setQuestion] = useState('')
   const [chatHistory, setChatHistory] = useState([])
   const [isLoading, setIsLoading] = useState(false)
-  const [selectedMode, setSelectedMode] = useState('assist')
   const [sourceList, setSourceList] = useState([])
   const [sourceName, setSourceName] = useState('')
   const [sourceType, setSourceType] = useState('document')
@@ -64,20 +56,11 @@ function App() {
   }, [])
 
   const buildRequestBody = (query) => {
-    const request = {
+    return {
       question: query,
-      assistant_mode: selectedMode === 'eli5' ? 'teach' : 'assist',
-      mode: selectedMode === 'technical' ? 'expert' : selectedMode === 'eli5' ? 'beginner' : 'normal',
+      assistant_mode: 'assist',
+      mode: 'normal',
     }
-
-    if (selectedMode === 'eli5') {
-      request.question = `${query} Explain this like I'm 5.`
-    }
-    if (selectedMode === 'example') {
-      request.question = `${query} Please include a real-world example.`
-    }
-
-    return request
   }
 
   const askAPI = async (payload) => {
@@ -321,20 +304,7 @@ function App() {
       <div className="right-panel">
         <div className="chat-panel-header">
           <h2>Chat with OmniBrain</h2>
-          <p>Ask your knowledge base questions and get grounded answers fast.</p>
-        </div>
-
-        <div className="mode-controls">
-          {modeOptions.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              className={`mode-button ${selectedMode === option.id ? 'active' : ''}`}
-              onClick={() => setSelectedMode(option.id)}
-            >
-              {option.label}
-            </button>
-          ))}
+          <p>Ask your knowledge base questions and get direct grounded answers.</p>
         </div>
 
         {isLoading && (

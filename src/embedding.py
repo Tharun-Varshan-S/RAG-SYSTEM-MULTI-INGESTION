@@ -7,7 +7,7 @@ import google.generativeai as genai
 logger = logging.getLogger(__name__)
 
 # Attempt to configure API key from environment variable
-api_key = os.environ.get("GEMINI_API_KEY", "AIzaSyB0M2sUT1BcV8fprtvj5pI0BbvruYfIAvg")
+api_key = os.environ.get("GEMINI_API_KEY", "AIzaSyBhpF6MjzCIsIOzB3fyaiR5VgyEWxK7-uU")
 if api_key:
     genai.configure(api_key=api_key)
 

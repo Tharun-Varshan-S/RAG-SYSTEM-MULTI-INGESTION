@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,18 @@ def _extract_json(text: str) -> dict[str, object] | None:
         return None
 
 
+def _is_direct_fact_query(query: str) -> bool:
+    normalized = query.strip().lower()
+    if len(normalized.split()) <= 6:
+        fact_tokens = [
+            "dob", "date of birth", "born", "age", "height", "wife", "spouse",
+            "when", "where", "who is", "full name", "nationality"
+        ]
+        if any(token in normalized for token in fact_tokens):
+            return True
+    return False
+
+
 def generate_response(query: str, context_chunks: list[str], level: str = "beginner", assistant_mode: str = "assist") -> dict[str, object]:
     """
     Generates a structured response using Gemini API based on the query, context, and user mode.
@@ -64,6 +77,7 @@ def generate_response(query: str, context_chunks: list[str], level: str = "begin
         }
 
     context_text = "\n\n".join(context_chunks)
+    is_fact_query = _is_direct_fact_query(query)
 
     if level == "expert":
         explanation_instructions = (
@@ -96,6 +110,16 @@ def generate_response(query: str, context_chunks: list[str], level: str = "begin
             "Focus on actionable guidance, code fixes, or steps the user can take next."
         )
 
+    factual_response_rules = ""
+    if is_fact_query:
+        factual_response_rules = (
+            "This is a direct factual lookup query. Keep the response concise and specific. "
+            "In 'explanation', answer in 1-2 sentences with the exact fact from context. "
+            "Do NOT include coding analogies, regex, architecture, or generic tutorials unless asked. "
+            "Set 'real_world_example' to an empty string unless the user explicitly asks for an example. "
+            "Keep 'next_steps' empty or very short."
+        )
+
     prompt = f"""
 You are a domain-specific developer knowledge copilot. Use the following context to answer the user's request.
 
@@ -108,6 +132,7 @@ User Query: {query}
 
 Instructions:
 {explanation_instructions}
+{factual_response_rules}
 
 Output JSON only with these fields:
 {{

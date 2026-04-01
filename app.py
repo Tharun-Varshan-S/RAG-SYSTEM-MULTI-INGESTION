@@ -199,6 +199,43 @@ def is_vague_query(question: str) -> bool:
     return False
 
 
+def is_direct_fact_query(question: str) -> bool:
+    text = question.strip().lower()
+    if len(text.split()) > 6:
+        return False
+
+    fact_tokens = [
+        "dob", "date of birth", "born", "age", "height", "wife", "spouse",
+        "when", "where", "who is", "full name", "nationality",
+    ]
+    return any(token in text for token in fact_tokens)
+
+
+def compact_fact_response(payload: dict[str, object]) -> dict[str, object]:
+    explanation = str(payload.get("explanation", "")).strip()
+    explanation = " ".join(explanation.split())
+    if explanation:
+        parts = re.split(r"(?<=[.!?])\s+", explanation)
+        explanation = " ".join(parts[:2]).strip()
+
+    understanding = str(payload.get("understanding", "")).strip()
+    if not understanding and explanation:
+        understanding = explanation
+
+    key_points = payload.get("key_points", [])
+    if isinstance(key_points, list):
+        key_points = [str(item).strip() for item in key_points if str(item).strip()][:2]
+    else:
+        key_points = []
+
+    payload["understanding"] = understanding
+    payload["key_points"] = key_points
+    payload["explanation"] = explanation
+    payload["real_world_example"] = ""
+    payload["next_steps"] = []
+    return payload
+
+
 def log_step(request_id: str, user_id: str, step_name: str, duration: float, extra: dict | None = None) -> None:
     payload = {
         "request_id": request_id,
@@ -509,7 +546,7 @@ async def ask_endpoint(req: AskRequest):
         "timestamp": time.time(),
     }))
 
-    cache_key = f"rag_response:{question.lower()}:{explanation_mode}:{assistant_mode}"
+    cache_key = f"rag_response:v2:{question.lower()}:{explanation_mode}:{assistant_mode}"
 
     if is_vague_query(question):
         clarification = {
@@ -524,7 +561,7 @@ async def ask_endpoint(req: AskRequest):
         set_cached_response(cache_key, clarification)
         return clarification
 
-    cache_key = f"rag_response:{question.lower()}:{explanation_mode}:{assistant_mode}"
+    cache_key = f"rag_response:v2:{question.lower()}:{explanation_mode}:{assistant_mode}"
     cached_result = get_cached_response(cache_key)
     if cached_result:
         return cached_result
@@ -595,6 +632,9 @@ async def ask_endpoint(req: AskRequest):
                 "real_world_example": "",
                 "next_steps": ["Retry with a simpler question", "Check the source data and try again"],
             }
+
+    if is_direct_fact_query(question):
+        output_payload = compact_fact_response(output_payload)
 
     total_time = time.time() - total_start
     result = {
