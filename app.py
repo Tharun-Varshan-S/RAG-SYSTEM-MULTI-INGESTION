@@ -1,15 +1,21 @@
+import io
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import List
 
+from urllib.parse import parse_qs, urlparse
+
 import redis
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pypdf import PdfReader
 from redis.exceptions import RedisError
+from youtube_transcript_api import YouTubeTranscriptApi
 
 from src.agents import (
     AgentPipelineError,
@@ -21,7 +27,7 @@ from src.agents import (
 )
 from src.embedding import get_embedding
 from src.ingestion import chunk_text
-from src.retriever import add_to_database
+from src.retriever import add_to_database, list_sources, load_database, save_database
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s [%(name)s] %(message)s')
 logger = logging.getLogger("rag-api")
@@ -81,6 +87,15 @@ class BatchIngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     status: str
     chunks_added: int
+
+
+class SourceCatalogItem(BaseModel):
+    name: str
+    type: str
+
+
+class SourceCatalogResponse(BaseModel):
+    sources: List[SourceCatalogItem]
 
 user_preferences: dict[str, str] = {}
 user_memory: dict[str, dict[str, object]] = {}
@@ -246,7 +261,104 @@ def set_cached_response(key: str, value: dict, expire_seconds: int = 300) -> Non
         logger.warning("Redis set failed, skipping cache store: %s", e)
 
 
+def normalize_source_type(source_type: str | None) -> str:
+    normalized = (source_type or "text").strip().lower()
+    if normalized == "video":
+        return "youtube"
+    if normalized in {"document", "code", "pdf", "youtube", "text"}:
+        return normalized
+    return "text"
+
+
+def store_ingested_text(text: str, source_type: str, source_name: str) -> int:
+    chunks = chunk_text(text, chunk_size=200)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Failed to create text chunks from input.")
+
+    chunks_added = 0
+    for chunk in chunks:
+        try:
+            emb = get_embedding(chunk)
+            if emb:
+                added = add_to_database(
+                    chunk,
+                    emb,
+                    source_type=source_type,
+                    source_name=source_name,
+                    persist=False,
+                )
+                if added:
+                    chunks_added += 1
+        except Exception as e:
+            logger.error("Error generating embedding for chunk: %s", e)
+
+    if chunks_added == 0:
+        raise HTTPException(status_code=500, detail="Ingestion failed. Ensure API keys or DB are configured correctly.")
+
+    save_database()
+
+    return chunks_added
+
+
+def extract_youtube_video_id(source_url: str) -> str | None:
+    parsed = urlparse(source_url.strip())
+    query_params = parse_qs(parsed.query)
+    if query_params.get("v"):
+        return query_params["v"][0]
+
+    path = parsed.path.strip("/")
+    if parsed.netloc in {"youtu.be", "www.youtu.be"} and path:
+        return path.split("/")[0]
+
+    match = re.search(r"(?:v=|/shorts/|/embed/|/)([A-Za-z0-9_-]{11})(?:[?&/]|$)", source_url)
+    if match:
+        return match.group(1)
+    return None
+
+
+def extract_youtube_transcript(source_url: str) -> str:
+    video_id = extract_youtube_video_id(source_url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Provide a valid YouTube URL.")
+
+    try:
+        transcript = YouTubeTranscriptApi().fetch(video_id, languages=("en",))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Unable to fetch a YouTube transcript: {e}") from e
+
+    transcript_text = "\n".join(snippet.text for snippet in transcript.snippets).strip()
+    if not transcript_text:
+        raise HTTPException(status_code=400, detail="The YouTube transcript was empty.")
+    return transcript_text
+
+
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Unable to read the PDF file: {e}") from e
+
+    page_texts: list[str] = []
+    for page in reader.pages:
+        try:
+            page_text = page.extract_text() or ""
+        except Exception as e:
+            logger.warning("Skipping unreadable PDF page: %s", e)
+            page_text = ""
+        if page_text.strip():
+            page_texts.append(page_text.strip())
+
+    text = "\n\n".join(page_texts).strip()
+    if not text:
+        raise HTTPException(
+            status_code=400,
+            detail="No text could be extracted from the PDF. If this is a scanned PDF, use OCR first.",
+        )
+    return text
+
+
 redis_client = _init_redis()
+load_database()
 
 @app.post("/set-preference")
 async def set_preference(req: SetPreferenceRequest):
@@ -274,26 +386,50 @@ async def ingest_endpoint(req: IngestRequest):
     if not req.text or not req.text.strip():
         raise HTTPException(status_code=400, detail="Text for ingestion cannot be empty.")
 
-    logger.info("Ingesting source type=%s source_name=%s", req.source_type, req.source_name)
-    chunks = chunk_text(req.text, chunk_size=200)
-    if not chunks:
-        raise HTTPException(status_code=400, detail="Failed to create text chunks from input.")
+    source_type = normalize_source_type(req.source_type)
+    logger.info("Ingesting source type=%s source_name=%s", source_type, req.source_name)
+    chunks_added = store_ingested_text(req.text, source_type, req.source_name)
+    return {"status": "success", "chunks_added": chunks_added}
 
-    chunks_added = 0
-    for chunk in chunks:
-        try:
-            emb = get_embedding(chunk)
-            if emb:
-                added = add_to_database(chunk, emb, source_type=req.source_type, source_name=req.source_name)
-                if added:
-                    chunks_added += 1
-        except Exception as e:
-            logger.error("Error generating embedding for chunk: %s", e)
 
-    logger.info("Ingest complete | type=%s | source=%s | chunks=%d", req.source_type, req.source_name, len(chunks))
-    if chunks_added == 0:
-        raise HTTPException(status_code=500, detail="Ingestion failed. Ensure API keys or DB are configured correctly.")
+@app.get("/sources", response_model=SourceCatalogResponse)
+async def sources_endpoint():
+    return {"sources": list_sources()}
 
+
+@app.post("/ingest-source", response_model=IngestResponse)
+async def ingest_source_endpoint(
+    source_type: str = Form(...),
+    source_name: str = Form("unknown"),
+    source_text: str = Form(""),
+    source_url: str = Form(""),
+    file: UploadFile | None = File(None),
+):
+    normalized_type = normalize_source_type(source_type)
+    normalized_name = source_name.strip() or "unknown"
+
+    if normalized_type == "pdf":
+        if file is None:
+            raise HTTPException(status_code=400, detail="Upload a PDF file to ingest this source.")
+        pdf_bytes = await file.read()
+        if not pdf_bytes:
+            raise HTTPException(status_code=400, detail="The uploaded PDF is empty.")
+        text = extract_pdf_text(pdf_bytes)
+        if normalized_name == "unknown" and file.filename:
+            normalized_name = os.path.splitext(file.filename)[0]
+    elif normalized_type == "youtube":
+        if not source_url.strip():
+            raise HTTPException(status_code=400, detail="Provide a YouTube URL to ingest this source.")
+        text = extract_youtube_transcript(source_url)
+        if normalized_name == "unknown":
+            normalized_name = extract_youtube_video_id(source_url) or "youtube source"
+    else:
+        if not source_text.strip():
+            raise HTTPException(status_code=400, detail="Source text cannot be empty for this source type.")
+        text = source_text
+
+    logger.info("Ingesting source type=%s source_name=%s", normalized_type, normalized_name)
+    chunks_added = store_ingested_text(text, normalized_type, normalized_name)
     return {"status": "success", "chunks_added": chunks_added}
 
 
@@ -318,7 +454,13 @@ async def ingest_batch_endpoint(req: BatchIngestRequest):
             try:
                 emb = get_embedding(chunk)
                 if emb:
-                    added = add_to_database(chunk, emb, source_type=source.type, source_name=source.source_name)
+                    added = add_to_database(
+                        chunk,
+                        emb,
+                        source_type=source.type,
+                        source_name=source.source_name,
+                        persist=False,
+                    )
                     if added:
                         total_added += 1
             except Exception as e:
@@ -326,6 +468,8 @@ async def ingest_batch_endpoint(req: BatchIngestRequest):
 
     if total_added == 0:
         raise HTTPException(status_code=500, detail="Batch ingestion failed. Ensure valid source content and embeddings.")
+
+    save_database()
 
     logger.info("Batch ingestion complete | total_sources=%d | total_chunks=%d | chunks_added=%d", len(req.sources), total_chunks, total_added)
     return {"status": "success", "chunks_added": total_added}

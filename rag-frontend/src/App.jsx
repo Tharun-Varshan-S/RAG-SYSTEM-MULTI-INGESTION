@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Bot, User, Send, Sparkles, FileText, Database, Layers, Code2, Video } from 'lucide-react'
+import { Bot, User, Send, FileText, Layers, Code2, Video, Loader2 } from 'lucide-react'
 import './App.css'
 
 const modeOptions = [
@@ -9,22 +9,28 @@ const modeOptions = [
   { id: 'assist', label: 'Assist' },
 ]
 
-const initialSources = [
-  { id: 1, name: 'BARACK OBAMA', type: 'code' },
-  { id: 2, name: 'CODE CHECK', type: 'code' },
-  { id: 3, name: 'LLM 2', type: 'youtube' },
-]
+const sourceHelpText = {
+  document: 'Paste copied text from a document, article, or note.',
+  code: 'Paste code snippets, snippets from docs, or repo notes.',
+  pdf: 'Upload a PDF file and OmniBrain will extract the text automatically.',
+  youtube: 'Paste a YouTube URL and OmniBrain will fetch the transcript automatically.',
+}
+
+const normalizeSourceType = (value) => (value === 'video' ? 'youtube' : value)
 
 function App() {
   const [question, setQuestion] = useState('')
   const [chatHistory, setChatHistory] = useState([])
   const [isLoading, setIsLoading] = useState(false)
   const [selectedMode, setSelectedMode] = useState('assist')
-  const [sourceList, setSourceList] = useState(initialSources)
+  const [sourceList, setSourceList] = useState([])
   const [sourceName, setSourceName] = useState('')
   const [sourceType, setSourceType] = useState('document')
   const [sourceText, setSourceText] = useState('')
+  const [sourceUrl, setSourceUrl] = useState('')
+  const [sourceFile, setSourceFile] = useState(null)
   const [notification, setNotification] = useState('')
+  const [isIngesting, setIsIngesting] = useState(false)
   const chatEndRef = useRef(null)
 
   const scrollToBottom = () => {
@@ -34,6 +40,28 @@ function App() {
   useEffect(() => {
     scrollToBottom()
   }, [chatHistory, isLoading])
+
+  const fetchSources = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/sources')
+      if (!response.ok) return
+      const payload = await response.json()
+      const sources = Array.isArray(payload?.sources)
+        ? payload.sources.map((item, index) => ({
+          id: `${item.name}-${item.type}-${index}`,
+          name: item.name,
+          type: item.type,
+        }))
+        : []
+      setSourceList(sources)
+    } catch {
+      // Keep the current source list when the backend is unavailable.
+    }
+  }
+
+  useEffect(() => {
+    fetchSources()
+  }, [])
 
   const buildRequestBody = (query) => {
     const request = {
@@ -111,34 +139,63 @@ function App() {
 
   const handleIngest = async (e) => {
     e.preventDefault()
-    if (!sourceText.trim() || !sourceName.trim()) {
-      setNotification('Provide both a source name and content before ingesting.')
+    if (isIngesting) return
+    const normalizedSourceType = normalizeSourceType(sourceType)
+
+    if (!sourceName.trim()) {
+      setNotification('Provide a source name before ingesting.')
+      return
+    }
+
+    if (normalizedSourceType === 'pdf' && !sourceFile) {
+      setNotification('Choose a PDF file before ingesting.')
+      return
+    }
+
+    if (normalizedSourceType === 'youtube' && !sourceUrl.trim()) {
+      setNotification('Paste a YouTube URL before ingesting.')
+      return
+    }
+
+    if ((normalizedSourceType === 'document' || normalizedSourceType === 'code') && !sourceText.trim()) {
+      setNotification('Paste the source text before ingesting.')
       return
     }
 
     try {
-      const response = await fetch('http://localhost:8000/ingest', {
+      setIsIngesting(true)
+      setNotification('')
+      const formData = new FormData()
+      formData.append('source_type', normalizedSourceType)
+      formData.append('source_name', sourceName.trim())
+
+      if (normalizedSourceType === 'pdf') {
+        formData.append('file', sourceFile)
+      } else if (normalizedSourceType === 'youtube') {
+        formData.append('source_url', sourceUrl.trim())
+      } else {
+        formData.append('source_text', sourceText.trim())
+      }
+
+      const response = await fetch('http://localhost:8000/ingest-source', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: sourceText,
-          source_name: sourceName,
-          source_type: sourceType,
-        }),
+        body: formData,
       })
       if (!response.ok) {
-        throw new Error('Failed to ingest source. Check the backend and try again.')
+        const errorPayload = await response.json().catch(() => null)
+        throw new Error(errorPayload?.detail || 'Failed to ingest source. Check the backend and try again.')
       }
       const result = await response.json()
-      setSourceList(prev => [
-        { id: Date.now(), name: sourceName, type: sourceType },
-        ...prev,
-      ])
+      await fetchSources()
       setSourceName('')
       setSourceText('')
+      setSourceUrl('')
+      setSourceFile(null)
       setNotification(`Ingested ${result.chunks_added} chunks from ${sourceName}.`)
     } catch (error) {
       setNotification(error.message)
+    } finally {
+      setIsIngesting(false)
     }
   }
 
@@ -147,6 +204,8 @@ function App() {
     if (type === 'code') return <Code2 size={16} />
     return <FileText size={16} />
   }
+
+  const activeSourceType = normalizeSourceType(sourceType)
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -193,7 +252,7 @@ function App() {
         <div className="panel-section">
           <div className="panel-section-header">
             <h3>Add Knowledge</h3>
-            <p>Upload text, code notes, or video transcripts.</p>
+            <p>Upload PDFs, paste document or code text, or provide a YouTube URL.</p>
           </div>
           <form className="ingest-form" onSubmit={handleIngest}>
             <label>
@@ -209,19 +268,51 @@ function App() {
               <select value={sourceType} onChange={(e) => setSourceType(e.target.value)}>
                 <option value="document">Document</option>
                 <option value="code">Code</option>
-                <option value="video">Video</option>
                 <option value="pdf">PDF</option>
+                <option value="youtube">YouTube</option>
               </select>
             </label>
-            <label>
-              Source content
-              <textarea
-                value={sourceText}
-                onChange={(e) => setSourceText(e.target.value)}
-                placeholder="Paste text, transcript, notes, or code here"
-              />
-            </label>
-            <button type="submit" className="primary-button">Ingest source</button>
+            <div className="source-help">{sourceHelpText[activeSourceType]}</div>
+            {activeSourceType === 'pdf' ? (
+              <label>
+                PDF file
+                <input
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  onChange={(event) => setSourceFile(event.target.files?.[0] || null)}
+                />
+                {sourceFile && <div className="file-name">Selected file: {sourceFile.name}</div>}
+              </label>
+            ) : activeSourceType === 'youtube' ? (
+              <label>
+                YouTube URL
+                <input
+                  type="url"
+                  value={sourceUrl}
+                  onChange={(e) => setSourceUrl(e.target.value)}
+                  placeholder="https://www.youtube.com/watch?v=..."
+                />
+              </label>
+            ) : (
+              <label>
+                Source content
+                <textarea
+                  value={sourceText}
+                  onChange={(e) => setSourceText(e.target.value)}
+                  placeholder="Paste text, notes, or code here"
+                />
+              </label>
+            )}
+            <button type="submit" className="primary-button" disabled={isIngesting}>
+              {isIngesting ? (
+                <>
+                  <Loader2 size={16} className="spin" />
+                  Ingesting...
+                </>
+              ) : (
+                'Ingest source'
+              )}
+            </button>
             {notification && <div className="form-error">{notification}</div>}
           </form>
         </div>
@@ -245,6 +336,13 @@ function App() {
             </button>
           ))}
         </div>
+
+        {isLoading && (
+          <div className="chat-loader-banner">
+            <Loader2 size={16} className="spin" />
+            OmniBrain is preparing a grounded answer...
+          </div>
+        )}
 
         <div className="chat-box">
           {chatHistory.length === 0 ? (
@@ -285,14 +383,6 @@ function App() {
               </div>
             ))
           )}
-          {isLoading && (
-            <div className="message-wrapper bot">
-              <div className="avatar bot"><Bot size={20} /></div>
-              <div className="message-content typing-indicator">
-                <span></span><span></span><span></span>
-              </div>
-            </div>
-          )}
           <div ref={chatEndRef} />
         </div>
 
@@ -307,7 +397,7 @@ function App() {
               rows={2}
             />
             <button type="submit" className="send-btn" disabled={isLoading || !question.trim()}>
-              <Send size={18} />
+              {isLoading ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
             </button>
           </form>
         </div>
