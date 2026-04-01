@@ -1,0 +1,49 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python virtual environments
+.venv/
+.venv-old/
+venv/
+env/
+
+# Environment and local config
+.env
+.env.*
+*.local
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Frontend dependencies and build output
+rag-frontend/node_modules/
+rag-frontend/dist/
+rag-frontend/dist-ssr/
+
+# Repository-specific temporary folders
+node_modules_broken/
+rag-frontend/node_modules_old/
+
+# Logs
+*.log
+logs/
